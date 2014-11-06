@@ -110,6 +110,8 @@ float getAverage (struct MovingAverageBuffer &m) {
 // indicates whether MPU interrupt pin has gone high
 volatile bool mpuInterrupt = false;     
 void dmpDataReady() {
+     // top-half of the interrupt routine,
+     // the rest is done in main loop for fast interrupt handling
     mpuInterrupt = true;
 }
 
@@ -134,6 +136,8 @@ SdFat sd;
 // Log file use for writing out the sensor data.
 SdFile log_file;
 
+long log_counter = 1;
+
 // ================================================================
 // ===                         AUXILIARY                        ===
 // ================================================================
@@ -145,7 +149,7 @@ void setup (void) {
     // Initialize serial port with baud rate 38400bips
     Serial.begin(38400);
     // Wait until serial monitor is openend.
-    while (!Serial) {}
+    //while (!Serial) {}
     // Small delay to ensure the serial port is initialized.
     delay(200);
 
@@ -176,13 +180,13 @@ void setup (void) {
 
     // Create a new log file with write permission.
     cout << pstr("Create log file...");
-    String str_log_file = "log1.txt";
+    String str_log_file = "log1.csv";
     char buf[16];
     int cnt = 1;
     str_log_file.toCharArray(buf, 16);
     while (sd.exists(buf)) {
       cnt += 1;
-      str_log_file = "log" + String(cnt) + ".txt";
+      str_log_file = "log" + String(cnt) + ".csv";
       str_log_file.toCharArray(buf,16);
     }
     if (!log_file.open(str_log_file.c_str(), O_WRITE | O_CREAT))
@@ -191,7 +195,7 @@ void setup (void) {
     cout << pstr("ok...") << str_log_file.c_str() << pstr(" created") << endl;
 
     cout << pstr("Initializing MPU6050 IMU...");
-    mpu.initialize(); // according to the MPU5060 library, the sample rate is 200Hz.
+    mpu.initialize(); // the sensor's internal sampling rate will be set to 100Hz.
     cout << pstr("ok") << endl;
 
     // verify connection
@@ -202,11 +206,13 @@ void setup (void) {
     cout << pstr("Initializing Digital Motion Processor (DMP)...");
     devStatus = mpu.dmpInitialize();
 
-    // set gyro offsets
-    mpu.setXGyroOffset(220);
-    mpu.setYGyroOffset(76);
-    mpu.setZGyroOffset(-85);
-    mpu.setZAccelOffset(1788); // 1688 factory default for my test chip
+    // set gyro and accelerometer offsets, manually fiddeled out
+    mpu.setXGyroOffset(36);
+    mpu.setYGyroOffset(16);
+    mpu.setZGyroOffset(-11);
+    mpu.setXAccelOffset(-3047);
+    mpu.setYAccelOffset(-61);
+    mpu.setZAccelOffset(3381);
 
     // make sure it worked (returns 0 if so)
     if (devStatus == 0) {
@@ -244,11 +250,21 @@ void setup (void) {
 
 void loop (void) {
     // if programming failed, don't try to do anything
-    if (!dmpReady) return; // FIXME: print error message and halt.
+    if (!dmpReady) return; // FIXME: print error message and halt
 
     // wait for MPU interrupt or extra packet(s) available
+    // 
+    // since the MPU internally samples with a rate of 100Hz,
+    // there are 10ms left between each package arrives
+    // 
+    // note, the variable mpuInterrupt is shared with the
+    // interrupt routine dmpDataReady. However, we don't have to
+    // dissable the interrupts temporarily since the variable
+    // mpuInterrupt is a bool which is written and read atomic
+    // 
+    // while there is no MPU package arrived, process the program logic
     while (!mpuInterrupt && fifoCount < packetSize) {
-      // other logics here...
+      // ...
     }
 
     // reset interrupt flag and get INT_STATUS byte
@@ -282,11 +298,16 @@ void loop (void) {
         mpu.dmpGetGravity(&gravity, &q);
         mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
 
+        // compute the magnitude (i.e. the length by applying the Pythagoras) of
+        // the  acceleration vector. doing so, does not force us to select a specific
+        // acceleration axis later on for the breath detection.
         float magnitude = sqrt(sq(aaReal.x) + sq(aaReal.y) + sq(aaReal.z));
 
         Serial.println(magnitude);
 
-        log_file.printf("%.4f\n", magnitude);
+        // finally let us log the data 
+        log_file.printf("%d, %.4f\n", log_counter, magnitude);
+        log_counter++;
 
         // flushes the data to the file
         // FIXME: flush only after e.g. 100 recordings; saves SD card lifetime.
